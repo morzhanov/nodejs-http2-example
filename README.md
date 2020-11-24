@@ -1,4 +1,4 @@
-# nodejs-net-http2-example
+# nodejs-http2-example
 
 Simple NodeJS HTTP2 server example (using core http2 module)
 
