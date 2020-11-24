@@ -8,7 +8,7 @@ Simple NodeJS HTTP2 server example (using core http2 module)
 npm run start
 ```
 
-Application accepts connections on 127.0.0.1:8000
+Application accepts connections on 127.0.0.1:8443
 
 ## Description
 
