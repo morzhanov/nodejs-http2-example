@@ -1,61 +1,133 @@
-import net, {Server, Socket} from 'net';
 import {inspect} from 'util';
+import {
+  createSecureServer,
+  constants,
+  Http2SecureServer,
+  ServerHttp2Stream,
+  IncomingHttpHeaders,
+} from 'http2';
+import fs from 'fs';
+import {resolve} from 'path';
+import mime from 'mime-types';
 
 import {errorHandler} from './utils';
-import {HttpMessage, Methods} from './interface';
+import {Http2Message, Methods} from './interface';
 import {deleteHandler, getHandler, postHandler, putHandler} from './router';
 
-const parseMessage = (message: Buffer): HttpMessage => {
-  const [requestHeader, ...bodyContent] = message.toString().split('\r\n\r\n');
+const {HTTP2_HEADER_PATH, HTTP2_HEADER_METHOD} = constants;
 
-  const [firstLine, ...otherLines] = requestHeader.split('\n');
-  const [method, path, httpVersion] = firstLine.trim().split(' ');
-  const headers = Object.fromEntries(
-    otherLines
-      .filter((_) => _)
-      .map((line) => line.split(':').map((part) => part.trim()))
-      .map(([name, ...rest]) => [name, rest.join(' ')]),
-  );
+const parseStream = (
+  stream: ServerHttp2Stream,
+  headers: IncomingHttpHeaders,
+): Promise<Http2Message> => {
+  return new Promise((resolveFn, rejectFn) => {
+    const data: Buffer[] = [];
+    stream.on('data', (chunk: Buffer) => data.push(chunk));
+    stream.on('error', (err) => {
+      errorHandler(err, stream);
+      rejectFn(err);
+    });
 
-  const request = {
-    method,
-    path,
-    httpVersion,
-    headers,
-    body: bodyContent.join(''),
-  };
-  console.log(`Request handled: ${inspect(request)}`);
-  return request;
-};
+    stream.on('end', () => {
+      let method = headers[HTTP2_HEADER_METHOD];
+      let path = headers[HTTP2_HEADER_PATH];
+      if (Array.isArray(path)) {
+        path = path.join('');
+      }
+      if (Array.isArray(method)) {
+        method = method.join('');
+      }
+      if (path === '/') {
+        path = 'index.html';
+      }
+      if (path?.indexOf('/') === 0) {
+        path = path.substr(1);
+      }
 
-const requestHandler = (socket: Socket, data: Buffer) => {
-  const {path, method, body} = parseMessage(data);
-  if (!path.startsWith('/users')) {
-    socket.write('HTTP/1.1 404 Not Found\n\n');
-    return socket.end();
-  }
+      const fullPath = resolve(__dirname, `public`, path || '');
+      const mimeType = mime.lookup(fullPath);
 
-  switch (method) {
-    case Methods.GET:
-      getHandler(socket, path);
-      break;
-    case Methods.POST:
-      postHandler(socket, body);
-      break;
-    case Methods.DELETE:
-      deleteHandler(socket, path);
-      break;
-    case Methods.PUT:
-      putHandler(socket, body, path);
-      break;
-    default:
-      socket.write('HTTP/1.1 404 Not Found\n\n');
-      return socket.end();
-  }
-};
-
-export const createServer = (): Server =>
-  net.createServer((socket) => {
-    socket.on('data', (data: Buffer) => requestHandler(socket, data));
-    socket.on('error', errorHandler);
+      const buff = Buffer.concat([...data]);
+      const body = buff.toString();
+      resolveFn({
+        method: method || 'GET',
+        body,
+        path: path || '',
+        fullPath,
+        mimeType,
+      });
+    });
   });
+};
+
+const requestHandler = async (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
+  const req = await parseStream(stream, headers);
+  console.log(`Request handled: ${inspect(req)}`);
+
+  // CRUD on http2 example
+  if (req.path?.indexOf('users') === 0) {
+    switch (req.method) {
+      case Methods.GET:
+        return getHandler(stream, req.path);
+      case Methods.POST:
+        return postHandler(stream, req.body || '');
+      case Methods.DELETE:
+        return deleteHandler(stream, req.path);
+      case Methods.PUT:
+        return putHandler(stream, req.body || '', req.path);
+      default:
+        stream.respond({':status': 404});
+        return stream.end();
+    }
+  }
+  // general static files example
+  if (req.path === 'index.html') {
+    return stream.respondWithFile(
+      req.fullPath,
+      {'content-type': req.mimeType.toString()},
+      {onError: (err: NodeJS.ErrnoException) => errorHandler(err, stream)},
+    );
+  }
+
+  // http2 push example
+  if (req.path === 'push.html') {
+    stream.respondWithFile(
+      req.fullPath,
+      {'content-type': req.mimeType.toString()},
+      {onError: (err: NodeJS.ErrnoException) => errorHandler(err, stream)},
+    );
+    return stream.pushStream(
+      {':path': '/push.css'},
+      {parent: stream.id},
+      (err: Error, pushStream) => {
+        if (err) {
+          errorHandler(err, stream);
+        }
+        console.log('Pushing additional content...');
+        pushStream.respondWithFile(
+          resolve(__dirname, `public`, 'push.css'),
+          {'content-type': 'text/css'},
+          {onError: (err) => errorHandler(err, stream)},
+        );
+      },
+    );
+  }
+
+  // page not found
+  stream.respond({':status': 404});
+  stream.end();
+};
+
+export const createServer = (): Http2SecureServer => {
+  const options = {
+    key: fs.readFileSync(resolve(__dirname, './tls/key.key')),
+    cert: fs.readFileSync(resolve(__dirname, './tls/cert.crt')),
+  };
+  const server = createSecureServer(options);
+  server.on('stream', requestHandler);
+  server.on('connect', (ev: any) => console.log(`Client connected: ${inspect(ev)}`));
+  server.on('close', (ev: any) => console.log(`Client closed: ${inspect(ev)}`));
+  server.on('ping', (ev: any) => console.log(`Client ping: ${inspect(ev)}`));
+
+  return server;
+};

@@ -5,12 +5,12 @@ export enum Methods {
   PUT = 'PUT',
 }
 
-export interface HttpMessage {
+export interface Http2Message {
   path: string;
+  body?: string;
+  fullPath: string;
   method: string;
-  httpVersion: string;
-  headers: {[k: string]: string};
-  body: string;
+  mimeType: string | false;
 }
 
 export interface User {
